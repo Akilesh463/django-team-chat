@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html>
+<head>
+
+<title>Team Chat</title>
+
+<style>
+
+body{
+    font-family: Arial;
+    display:flex;
+    margin:0;
+}
+
+.sidebar{
+    width:220px;
+    background:#2f3136;
+    color:white;
+    padding:15px;
+    height:100vh;
+}
+
+.sidebar h3{
+    margin-top:0;
+}
+
+.sidebar a{
+    display:block;
+    color:white;
+    text-decoration:none;
+    margin:10px 0;
+}
+
+.sidebar a:hover{
+    color:#00bcd4;
+}
+
+.chat{
+    flex:1;
+    padding:20px;
+    display:flex;
+    flex-direction:column;
+}
+
+#messages{
+    flex:1;
+    overflow-y:auto;
+    list-style:none;
+    padding:0;
+}
+
+#messages li{
+    background:#f1f1f1;
+    padding:10px;
+    border-radius:8px;
+    margin-bottom:10px;
+    width:fit-content;
+    max-width:60%;
+}
+
+#typingStatus{
+    color:gray;
+    margin-bottom:5px;
+}
+
+.input-area{
+    margin-top:10px;
+}
+
+img{
+    margin-top:5px;
+    border-radius:6px;
+}
+
+#searchBox{
+    margin-bottom:10px;
+    padding:6px;
+    width:250px;
+    border-radius:5px;
+    border:1px solid #ccc;
+}
+
+.badge{
+background:red;
+color:white;
+padding:2px 6px;
+border-radius:10px;
+font-size:12px;
+margin-left:6px;
+display:none;
+}
+
+</style>
+
+</head>
+
+<body>
+
+{% csrf_token %}
+
+<audio id="notifSound">
+<source src="https://www.soundjay.com/buttons/sounds/button-3.mp3" type="audio/mpeg">
+</audio>
+
+<div class="sidebar">
+
+<h3>Channels</h3>
+
+<form action="/create-channel/" method="post">
+{% csrf_token %}
+<input type="text" name="channel_name" placeholder="New channel" required>
+<button type="submit">Create</button>
+</form>
+
+<br>
+
+{% for channel in channels %}
+<a href="/chat/{{ channel.name }}/">
+# {{ channel.name }}
+<span class="badge" id="badge-{{ channel.name }}"></span>
+</a>
+{% endfor %}
+
+<br>
+
+<h4>Online Users</h4>
+<ul id="onlineUsers"></ul>
+
+<br>
+
+<p>Logged in as:<br>
+<strong>{{ request.user.username }}</strong></p>
+
+<form action="/logout/" method="post">
+{% csrf_token %}
+<button type="submit">Logout</button>
+</form>
+
+</div>
+
+
+<div class="chat">
+
+<h2># {{ room_name }}</h2>
+<div id="pageNotification" style="display:none;background:#00bcd4;color:white;padding:8px;margin-bottom:10px;border-radius:5px;">
+New message received
+</div>
+
+<input type="text" id="searchBox" placeholder="Search messages...">
+
+<div id="typingStatus"></div>
+
+<ul id="messages">
+
+{% for message in messages %}
+
+<li>
+
+<strong>{{ message.user }}</strong>:
+
+{% if message.file %}
+
+{% if message.file.url|lower|slice:"-4:" == ".jpg" or message.file.url|lower|slice:"-4:" == ".png" or message.file.url|lower|slice:"-5:" == ".jpeg" %}
+
+<br>
+<img src="{{ message.file.url }}" width="200">
+
+{% else %}
+
+<br>
+<a href="{{ message.file.url }}" target="_blank">📎 Download File</a>
+
+{% endif %}
+
+{% else %}
+
+{{ message.content }}
+
+{% endif %}
+
+</li>
+
+{% endfor %}
+
+</ul>
+
+
+<div class="input-area">
+
+<input id="messageInput" type="text" placeholder="Type message">
+<input type="file" id="fileInput">
+<button onclick="sendMessage()">Send</button>
+
+</div>
+
+</div>
+
+
+
+<script>
+
+let unreadCounts = {}
+
+let roomName = "{{ room_name }}"
+let username = "{{ request.user.username }}"
+
+// CHAT SOCKET
+let socket = new WebSocket(
+"ws://" + window.location.host + "/ws/chat/" + roomName + "/"
+)
+
+// GLOBAL NOTIFICATION SOCKET
+let notificationSocket = new WebSocket(
+"ws://" + window.location.host + "/ws/notifications/"
+)
+
+notificationSocket.onmessage = function(event){
+
+let data = JSON.parse(event.data)
+
+if(data.type === "notification"){
+
+// ignore own messages
+if(data.user === username) return
+
+// if message is in another channel
+if(data.room !== roomName){
+
+let banner = document.getElementById("pageNotification")
+
+banner.innerText = "New message in #" + data.room + " from " + data.user
+banner.style.display = "block"
+
+setTimeout(function(){
+banner.style.display = "none"
+},3000)
+
+// update sidebar unread badge
+let badge = document.getElementById("badge-" + data.room)
+
+if(badge){
+
+if(!unreadCounts[data.room]){
+unreadCounts[data.room] = 0
+}
+
+unreadCounts[data.room]++
+
+badge.innerText = unreadCounts[data.room]
+badge.style.display = "inline"
+
+}
+
+}
+
+}
+
+}
+
+
+
+socket.onopen = function(){
+console.log("Chat WebSocket connected")
+}
+
+socket.onclose = function(){
+console.log("Chat WebSocket closed")
+}
+
+socket.onerror = function(error){
+console.log("WebSocket error", error)
+}
+
+let typingTimer
+
+
+
+document.getElementById("messageInput").addEventListener("keyup", function(event){
+
+if(event.key === "Enter"){
+sendMessage()
+return
+}
+
+socket.send(JSON.stringify({
+"type":"typing",
+"user":username
+}))
+
+clearTimeout(typingTimer)
+
+typingTimer = setTimeout(function(){
+
+socket.send(JSON.stringify({
+"type":"stop_typing",
+"user":username
+}))
+
+},1000)
+
+})
+
+
+
+socket.onmessage = function(event){
+
+let data = JSON.parse(event.data)
+
+if(data.type === "chat"){
+
+let li = document.createElement("li")
+let message = data.message
+
+
+// IMAGE FILE
+if(message.startsWith("/media/") &&
+(message.endsWith(".png") || message.endsWith(".jpg") || message.endsWith(".jpeg") || message.endsWith(".gif"))){
+
+li.innerHTML =
+"<strong>"+data.user+"</strong> " +
+"<span style='color:gray;font-size:12px;'>"+data.timestamp+"</span><br>" +
+"<img src='"+message+"' width='200'>"
+
+}
+
+// OTHER FILE
+else if(message.startsWith("/media/")){
+
+li.innerHTML =
+"<strong>"+data.user+"</strong>:<br>" +
+"<a href='"+message+"' target='_blank'>📎 Download File</a>"
+
+}
+
+// TEXT MESSAGE
+else{
+
+li.innerHTML =
+"<strong>"+data.user+"</strong> " +
+"<span style='color:gray;font-size:12px;'>"+data.timestamp+"</span>: " +
+message
+
+}
+
+document.querySelector("#messages").appendChild(li)
+
+autoScroll()
+
+}
+
+
+
+// TYPING INDICATOR
+if(data.type === "typing"){
+document.getElementById("typingStatus").innerText =
+data.user + " is typing..."
+}
+
+if(data.type === "stop_typing"){
+document.getElementById("typingStatus").innerText = ""
+}
+
+
+
+// ONLINE USERS
+if(data.type === "presence"){
+
+let list = document.getElementById("onlineUsers")
+
+list.innerHTML = ""
+
+data.users.forEach(function(user){
+
+let li = document.createElement("li")
+
+li.textContent = "● " + user
+
+list.appendChild(li)
+
+})
+
+}
+
+}
+
+
+
+window.sendMessage = function(){
+
+let message = document.getElementById("messageInput").value
+let fileInput = document.getElementById("fileInput").files[0]
+
+if(socket.readyState !== WebSocket.OPEN){
+console.log("WebSocket not connected yet")
+return
+}
+
+if(message.trim()==="" && !fileInput){
+return
+}
+
+
+// FILE MESSAGE
+if(fileInput){
+
+let formData = new FormData()
+
+formData.append("user", username)
+formData.append("message", message)
+formData.append("file", fileInput)
+formData.append("room", roomName)
+
+const csrftoken = document.querySelector('[name=csrfmiddlewaretoken]').value
+
+fetch("/upload/",{
+method:"POST",
+headers:{
+"X-CSRFToken": csrftoken
+},
+body:formData
+})
+.then(response => response.json())
+.then(data => {
+
+let fileUrl = data.file_url
+
+socket.send(JSON.stringify({
+"type":"chat",
+"user":username,
+"message":fileUrl
+}))
+
+})
+
+}
+
+// TEXT MESSAGE
+else{
+
+socket.send(JSON.stringify({
+"type":"chat",
+"user":username,
+"message":message
+}))
+
+}
+
+document.getElementById("messageInput").value=""
+document.getElementById("fileInput").value=""
+
+}
+
+
+
+function autoScroll(){
+
+let chat = document.querySelector("#messages")
+chat.scrollTop = chat.scrollHeight
+
+}
+
+autoScroll()
+
+
+
+// MESSAGE SEARCH
+document.getElementById("searchBox").addEventListener("keyup", function(){
+
+let value = this.value.toLowerCase()
+let messages = document.querySelectorAll("#messages li")
+
+messages.forEach(function(msg){
+
+if(msg.textContent.toLowerCase().includes(value)){
+msg.style.display = ""
+}
+else{
+msg.style.display = "none"
+}
+
+})
+
+})
+
+</script>
+
+</body>
+</html>
